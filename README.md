@@ -1,7 +1,7 @@
 # WebChatLocalLan (Python)
 
 Webapp chat nội bộ LAN, không cần đăng nhập:
-- Tự nhận diện người dùng theo IP.
+- Tự nhận diện người dùng theo `device_id` (vân tay đơn giản lưu localStorage), vẫn hiển thị IP mạng.
 - Xem danh sách ai đang online (đang mở web).
 - Chat công khai và chat riêng theo IP.
 - Gửi ảnh/file, hiển thị media ngay trong khung chat.
@@ -92,7 +92,7 @@ sudo systemctl status webchat-local-lan.service
 ## 5) Luồng sử dụng
 
 - Mở web trên các máy cùng LAN.
-- Sidebar hiển thị người online theo IP.
+- Sidebar hiển thị người online theo thiết bị (kèm `device_id` rút gọn + IP mạng).
 - Chọn `# Public` để chat chung.
 - Chọn một IP để chat riêng, client sẽ dùng E2EE nếu peer đã có key (`[E2EE]`).
 - Form dưới cùng dùng để gửi ảnh/file:
@@ -100,7 +100,16 @@ sudo systemctl status webchat-local-lan.service
   - Private: file được mã hóa phía trình duyệt trước khi upload.
 - Mỗi client có fingerprint khóa ở sidebar. Nếu cần xác minh chống giả mạo, đối chiếu fingerprint giữa 2 máy qua kênh khác.
 
-## 6) Đề xuất nâng cao (nên làm tiếp)
+## 6) Ghi chú định danh thiết bị
+
+- Nếu nhiều thiết bị đi qua cùng một router/NAT thì server có thể thấy cùng IP.
+- App dùng `device_id` riêng trên từng trình duyệt để tách thiết bị.
+- `device_id` được tạo tự động và lưu trong `localStorage`.
+- Nếu muốn tạo lại vân tay thiết bị, xóa localStorage key:
+  - `webchat_device_profile_v1`
+  - (tuỳ chọn) `webchat_e2ee_identity_v1`
+
+## 7) Đề xuất nâng cao (nên làm tiếp)
 
 1. Đặt tên hiển thị theo máy (lưu localStorage, vẫn giữ IP làm định danh thật).
 2. Lưu lịch sử vào SQLite (thay vì RAM) để không mất khi restart.

@@ -1,10 +1,12 @@
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const E2EE_STORAGE_KEY = "webchat_e2ee_identity_v1";
+const DEVICE_PROFILE_KEY = "webchat_device_profile_v1";
 
 const state = {
   socket: null,
-  myIp: "",
+  myClientId: "",
+  myNetworkIp: "",
   users: [],
   messages: [],
   knownMessageIds: new Set(),
@@ -19,6 +21,7 @@ const state = {
   sharedKeyCache: new Map(),
   textDecryptCache: new Map(),
   fileDecryptCache: new Map(),
+  deviceProfile: null,
 };
 
 const elements = {
@@ -39,11 +42,98 @@ const elements = {
 
 function socketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}/ws`;
+  const url = new URL(`${protocol}://${window.location.host}/ws`);
+  if (state.deviceProfile?.deviceId) {
+    url.searchParams.set("device_id", state.deviceProfile.deviceId);
+  }
+  if (state.deviceProfile?.deviceName) {
+    url.searchParams.set("device_name", state.deviceProfile.deviceName);
+  }
+  return url.toString();
 }
 
 function setStatus(text) {
   elements.wsStatus.textContent = text;
+}
+
+function toSlug(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+}
+
+function randomHex(bytes = 6) {
+  const buffer = new Uint8Array(bytes);
+  crypto.getRandomValues(buffer);
+  return Array.from(buffer, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function defaultDeviceName() {
+  const ua = navigator.userAgent || "browser";
+  if (/iphone/i.test(ua)) {
+    return "iPhone";
+  }
+  if (/ipad/i.test(ua)) {
+    return "iPad";
+  }
+  if (/android/i.test(ua)) {
+    return "Android";
+  }
+  if (/windows/i.test(ua)) {
+    return "Windows";
+  }
+  if (/macintosh|mac os x/i.test(ua)) {
+    return "Mac";
+  }
+  if (/linux/i.test(ua)) {
+    return "Linux";
+  }
+  return "Browser";
+}
+
+function loadOrCreateDeviceProfile() {
+  const raw = localStorage.getItem(DEVICE_PROFILE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (
+        parsed &&
+        typeof parsed.deviceId === "string" &&
+        /^[a-z0-9:._-]{3,80}$/.test(parsed.deviceId) &&
+        typeof parsed.deviceName === "string" &&
+        parsed.deviceName.trim()
+      ) {
+        return {
+          deviceId: parsed.deviceId,
+          deviceName: parsed.deviceName.trim().slice(0, 64),
+        };
+      }
+    } catch (_) {
+      // Ignore invalid profile and regenerate.
+    }
+  }
+
+  const baseName = defaultDeviceName();
+  const shortName = toSlug(baseName) || "device";
+  const deviceId = `dev:${shortName}-${randomHex(5)}`;
+  const profile = {
+    deviceId,
+    deviceName: baseName,
+  };
+  localStorage.setItem(DEVICE_PROFILE_KEY, JSON.stringify(profile));
+  return profile;
+}
+
+function shortClientId(clientId) {
+  if (!clientId) {
+    return "unknown";
+  }
+  if (clientId.length <= 18) {
+    return clientId;
+  }
+  return `${clientId.slice(0, 12)}...${clientId.slice(-4)}`;
 }
 
 function stableStringify(value) {
@@ -217,23 +307,39 @@ function addMessage(message) {
   state.messages.push(message);
 }
 
-function getUserByIp(ip) {
-  return state.users.find((user) => user.ip === ip) || null;
+function getUserById(clientId) {
+  return state.users.find((user) => user.ip === clientId) || null;
 }
 
-function getRecipientIdentity(ip) {
-  const user = getUserByIp(ip);
+function getRecipientIdentity(clientId) {
+  const user = getUserById(clientId);
   if (!user || !isValidPublicJwk(user.public_key) || typeof user.key_fingerprint !== "string") {
     return null;
   }
   return { publicJwk: user.public_key, fingerprint: user.key_fingerprint };
 }
 
+function formatUserLabel(clientId) {
+  if (!clientId) {
+    return "unknown";
+  }
+  if (clientId === state.myClientId) {
+    return "Ban";
+  }
+  const user = getUserById(clientId);
+  if (!user) {
+    return shortClientId(clientId);
+  }
+  const name = (user.device_name || "").trim() || shortClientId(clientId);
+  const ipSuffix = user.network_ip ? ` @${user.network_ip}` : "";
+  return `${name}${ipSuffix}`;
+}
+
 function updateRoomButtons() {
   elements.publicBtn.classList.toggle("active", state.activeRecipient === null);
   const roomButtons = elements.users.querySelectorAll(".room-btn");
   roomButtons.forEach((button) => {
-    const isCurrent = button.dataset.ip === state.activeRecipient;
+    const isCurrent = button.dataset.id === state.activeRecipient;
     button.classList.toggle("active", isCurrent);
   });
 }
@@ -247,10 +353,11 @@ function updateRoomUi() {
     elements.roomTitle.textContent = "Phong cong khai";
   } else {
     const peer = getRecipientIdentity(state.activeRecipient);
+    const peerLabel = formatUserLabel(state.activeRecipient);
     if (peer) {
-      elements.roomTitle.textContent = `Chat rieng voi ${state.activeRecipient} (E2EE)`;
+      elements.roomTitle.textContent = `Chat rieng voi ${peerLabel} (E2EE)`;
     } else {
-      elements.roomTitle.textContent = `Chat rieng voi ${state.activeRecipient} (chua co key)`;
+      elements.roomTitle.textContent = `Chat rieng voi ${peerLabel} (chua co key)`;
     }
   }
   updateRoomButtons();
@@ -262,8 +369,14 @@ function renderUsers() {
   elements.users.innerHTML = "";
 
   const visibleUsers = state.users
-    .filter((user) => user.ip !== state.myIp)
-    .sort((a, b) => a.ip.localeCompare(b.ip));
+    .filter((user) => user.ip !== state.myClientId)
+    .sort((a, b) => {
+      const an = (a.device_name || a.ip || "").toLowerCase();
+      const bn = (b.device_name || b.ip || "").toLowerCase();
+      if (an < bn) return -1;
+      if (an > bn) return 1;
+      return String(a.ip || "").localeCompare(String(b.ip || ""));
+    });
 
   if (state.activeRecipient && !visibleUsers.some((user) => user.ip === state.activeRecipient)) {
     state.activeRecipient = null;
@@ -279,9 +392,12 @@ function renderUsers() {
   visibleUsers.forEach((user) => {
     const button = document.createElement("button");
     button.className = "room-btn";
-    button.dataset.ip = user.ip;
+    button.dataset.id = user.ip;
     const e2eeTag = user.key_fingerprint ? " [E2EE]" : " [no-key]";
-    button.textContent = `${user.ip} (${user.connections})${e2eeTag}`;
+    const shortId = shortClientId(user.ip);
+    const networkIp = user.network_ip || "?";
+    const deviceName = user.device_name || "Device";
+    button.textContent = `${deviceName} | ${shortId} | ${networkIp} (${user.connections})${e2eeTag}`;
     if (state.activeRecipient === user.ip) {
       button.classList.add("active");
     }
@@ -323,7 +439,7 @@ function formatBytes(bytes) {
 }
 
 function isVisibleInCurrentRoom(message) {
-  if (!state.myIp) {
+  if (!state.myClientId) {
     return false;
   }
   if (state.activeRecipient === null) {
@@ -333,14 +449,14 @@ function isVisibleInCurrentRoom(message) {
     return false;
   }
   return (
-    (message.sender_ip === state.myIp && message.recipient_ip === state.activeRecipient) ||
-    (message.sender_ip === state.activeRecipient && message.recipient_ip === state.myIp)
+    (message.sender_ip === state.myClientId && message.recipient_ip === state.activeRecipient) ||
+    (message.sender_ip === state.activeRecipient && message.recipient_ip === state.myClientId)
   );
 }
 
 function makeMetaLine(message) {
-  const sender = message.sender_ip === state.myIp ? "Ban" : message.sender_ip;
-  const target = message.recipient_ip ? ` -> ${message.recipient_ip}` : " -> public";
+  const sender = formatUserLabel(message.sender_ip);
+  const target = message.recipient_ip ? ` -> ${formatUserLabel(message.recipient_ip)}` : " -> public";
   const e2eeTag = message.message_type.startsWith("e2ee_") ? " | E2EE" : "";
   return `${sender}${target} | ${formatTime(message.timestamp)}${e2eeTag}`;
 }
@@ -410,15 +526,15 @@ function randomIv() {
   return crypto.getRandomValues(new Uint8Array(12));
 }
 
-async function encryptPrivateText(text, recipientIp) {
-  const peer = getRecipientIdentity(recipientIp);
+async function encryptPrivateText(text, recipientId) {
+  const peer = getRecipientIdentity(recipientId);
   if (!peer) {
     throw new Error("Nguoi nhan chua cong bo key E2EE.");
   }
 
   const sharedKey = await deriveSharedKey(peer.publicJwk, peer.fingerprint);
   const iv = randomIv();
-  const aad = textEncoder.encode(`webchat:e2ee:text:v1:${state.myIp}->${recipientIp}`);
+  const aad = textEncoder.encode(`webchat:e2ee:text:v1:${state.myClientId}->${recipientId}`);
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, additionalData: aad },
     sharedKey,
@@ -435,7 +551,7 @@ async function encryptPrivateText(text, recipientIp) {
 
 function getPeerFromEncryptedMessage(message) {
   const encrypted = message.encrypted || {};
-  if (message.sender_ip === state.myIp) {
+  if (message.sender_ip === state.myClientId) {
     return {
       publicJwk: encrypted.recipient_public_jwk,
       fingerprint: encrypted.recipient_fingerprint,
@@ -523,8 +639,8 @@ function renderPlainAttachment(message) {
   return wrapper;
 }
 
-async function encryptPrivateFile(file, recipientIp, caption) {
-  const peer = getRecipientIdentity(recipientIp);
+async function encryptPrivateFile(file, recipientId, caption) {
+  const peer = getRecipientIdentity(recipientId);
   if (!peer) {
     throw new Error("Nguoi nhan chua cong bo key E2EE.");
   }
@@ -532,7 +648,7 @@ async function encryptPrivateFile(file, recipientIp, caption) {
   const sharedKey = await deriveSharedKey(peer.publicJwk, peer.fingerprint);
   const fileBytes = await file.arrayBuffer();
   const fileIv = randomIv();
-  const fileAad = textEncoder.encode(`webchat:e2ee:file:v1:${state.myIp}->${recipientIp}`);
+  const fileAad = textEncoder.encode(`webchat:e2ee:file:v1:${state.myClientId}->${recipientId}`);
   const encryptedFile = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: fileIv, additionalData: fileAad },
     sharedKey,
@@ -546,7 +662,7 @@ async function encryptPrivateFile(file, recipientIp, caption) {
     caption: caption || null,
   };
   const metadataIv = randomIv();
-  const metadataAad = textEncoder.encode(`webchat:e2ee:file-meta:v1:${state.myIp}->${recipientIp}`);
+  const metadataAad = textEncoder.encode(`webchat:e2ee:file-meta:v1:${state.myClientId}->${recipientId}`);
   const metadataCiphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: metadataIv, additionalData: metadataAad },
     sharedKey,
@@ -707,7 +823,7 @@ function renderMessages() {
   visibleMessages.forEach((message) => {
     const item = document.createElement("article");
     item.className = "message";
-    if (message.sender_ip === state.myIp) {
+    if (message.sender_ip === state.myClientId) {
       item.classList.add("mine");
     } else {
       item.classList.add("other");
@@ -766,13 +882,13 @@ function renderMessages() {
 }
 
 function isTypingEventRelevant(payload) {
-  if (!payload || payload.sender_ip === state.myIp) {
+  if (!payload || payload.sender_ip === state.myClientId) {
     return false;
   }
   if (state.activeRecipient === null) {
     return payload.recipient_ip === null;
   }
-  return payload.sender_ip === state.activeRecipient && payload.recipient_ip === state.myIp;
+  return payload.sender_ip === state.activeRecipient && payload.recipient_ip === state.myClientId;
 }
 
 function sendSocketJson(payload) {
@@ -801,8 +917,13 @@ function handleSocketEvent(payload) {
   }
 
   if (payload.type === "hello") {
-    state.myIp = payload.me?.ip || "";
-    elements.myIp.textContent = state.myIp || "unknown";
+    state.myClientId = payload.me?.id || payload.me?.ip || "";
+    state.myNetworkIp = payload.me?.ip || "";
+    const displayName =
+      payload.me?.device_name || state.deviceProfile?.deviceName || shortClientId(state.myClientId);
+    const idShort = shortClientId(state.myClientId);
+    const ipPart = state.myNetworkIp ? ` @${state.myNetworkIp}` : "";
+    elements.myIp.textContent = `${displayName} | ${idShort}${ipPart}`;
     state.users = Array.isArray(payload.users) ? payload.users : [];
     state.messages = [];
     state.knownMessageIds = new Set();
@@ -839,7 +960,7 @@ function handleSocketEvent(payload) {
     }
     if (payload.is_typing) {
       state.typingPeer = payload.sender_ip;
-      updateTypingHint(`${payload.sender_ip} dang nhap...`);
+      updateTypingHint(`${formatUserLabel(payload.sender_ip)} dang nhap...`);
     } else if (state.typingPeer === payload.sender_ip) {
       state.typingPeer = null;
       updateTypingHint("");
@@ -900,7 +1021,7 @@ function sendTypingState(isTyping) {
   state.typingSent = isTyping;
   sendSocketJson({
     type: "typing",
-    recipient_ip: state.activeRecipient,
+    recipient_id: state.activeRecipient,
     is_typing: isTyping,
   });
 }
@@ -928,7 +1049,7 @@ elements.sendForm.addEventListener("submit", async (event) => {
       const encrypted = await encryptPrivateText(text, state.activeRecipient);
       sent = sendSocketJson({
         type: "send_encrypted_message",
-        recipient_ip: state.activeRecipient,
+        recipient_id: state.activeRecipient,
         encrypted,
       });
     } catch (error) {
@@ -939,7 +1060,7 @@ elements.sendForm.addEventListener("submit", async (event) => {
     sent = sendSocketJson({
       type: "send_message",
       text,
-      recipient_ip: null,
+      recipient_id: null,
     });
   }
 
@@ -974,6 +1095,9 @@ elements.uploadForm.addEventListener("submit", async (event) => {
   }
 
   const formData = new FormData();
+  if (state.deviceProfile?.deviceId) {
+    formData.append("device_id", state.deviceProfile.deviceId);
+  }
 
   if (state.activeRecipient) {
     if (!state.e2eeReady || !state.identity) {
@@ -984,7 +1108,7 @@ elements.uploadForm.addEventListener("submit", async (event) => {
       const caption = elements.fileCaption.value.trim();
       const encrypted = await encryptPrivateFile(file, state.activeRecipient, caption);
       formData.append("file", encrypted.encryptedBlob, "encrypted.bin");
-      formData.append("recipient_ip", state.activeRecipient);
+      formData.append("recipient_id", state.activeRecipient);
       formData.append("encrypted_payload", JSON.stringify(encrypted.encryptedPayload));
     } catch (error) {
       setStatus(String(error?.message || error || "E2EE file encrypt failed"));
@@ -1001,6 +1125,7 @@ elements.uploadForm.addEventListener("submit", async (event) => {
   try {
     const response = await fetch("/api/upload", {
       method: "POST",
+      headers: state.deviceProfile?.deviceId ? { "x-device-id": state.deviceProfile.deviceId } : {},
       body: formData,
     });
     const payload = await response.json();
@@ -1018,6 +1143,11 @@ elements.uploadForm.addEventListener("submit", async (event) => {
   }
 });
 
+function initializeDeviceProfile() {
+  const profile = loadOrCreateDeviceProfile();
+  state.deviceProfile = profile;
+}
+
 window.setInterval(() => {
   sendSocketJson({ type: "ping" });
 }, 30000);
@@ -1031,6 +1161,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 async function bootstrap() {
+  initializeDeviceProfile();
   try {
     await initializeE2EEIdentity();
   } catch (_) {
@@ -1041,4 +1172,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-

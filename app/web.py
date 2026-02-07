@@ -34,6 +34,48 @@ def _normalize_optional_ip(ip: str | None) -> str | None:
     return normalized
 
 
+def _normalize_device_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip().lower()
+    if not cleaned:
+        return None
+    if len(cleaned) > 80:
+        return None
+    if not re.fullmatch(r"[a-z0-9:._-]+", cleaned):
+        return None
+    return cleaned
+
+
+def _normalize_device_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"\s+", " ", str(value).strip())
+    if not cleaned:
+        return None
+    if len(cleaned) > 64:
+        cleaned = cleaned[:64]
+    return cleaned
+
+
+def _pick_client_id(request_ip: str, provided_id: str | None) -> str:
+    device_id = _normalize_device_id(provided_id)
+    if device_id:
+        return device_id
+    # Backward compatibility for old clients that do not send device id.
+    return f"ip-{request_ip}"
+
+
+def _normalize_recipient_id(value: str | None) -> str | None:
+    device_id = _normalize_device_id(value)
+    if device_id:
+        return device_id
+    legacy_ip = _normalize_optional_ip(value)
+    if legacy_ip:
+        return f"ip-{legacy_ip}"
+    return None
+
+
 def _client_ip_from_request(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
@@ -163,12 +205,18 @@ async def list_users() -> dict[str, list[dict]]:
 async def upload_file(
     request: Request,
     file: UploadFile = File(...),
+    recipient_id: str | None = Form(default=None),
     recipient_ip: str | None = Form(default=None),
+    device_id: str | None = Form(default=None),
     caption: str | None = Form(default=None),
     encrypted_payload: str | None = Form(default=None),
 ) -> dict:
-    sender_ip = _client_ip_from_request(request)
-    target_ip = _normalize_optional_ip(recipient_ip)
+    sender_network_ip = _client_ip_from_request(request)
+    sender_client_id = _pick_client_id(
+        request_ip=sender_network_ip,
+        provided_id=(request.headers.get("x-device-id") or device_id),
+    )
+    target_client_id = _normalize_recipient_id(recipient_id or recipient_ip)
     cleaned_name = _safe_filename(file.filename or "file")
     random_prefix = secrets.token_hex(8)
     stored_name = f"{random_prefix}_{cleaned_name}"
@@ -194,8 +242,8 @@ async def upload_file(
         await file.close()
 
     if encrypted_payload:
-        if target_ip is None:
-            raise HTTPException(status_code=400, detail="Tin nhắn E2EE cần recipient_ip.")
+        if target_client_id is None:
+            raise HTTPException(status_code=400, detail="Tin nhắn E2EE cần recipient_id.")
         try:
             raw_payload = json.loads(encrypted_payload)
         except json.JSONDecodeError as exc:
@@ -216,8 +264,8 @@ async def upload_file(
             kind="encrypted",
         )
         message = await chat_manager.send_encrypted_file(
-            sender_ip=sender_ip,
-            recipient_ip=target_ip,
+            sender_ip=sender_client_id,
+            recipient_ip=target_client_id,
             attachment=attachment,
             encrypted=encrypted,
         )
@@ -234,8 +282,8 @@ async def upload_file(
     )
 
     message = await chat_manager.send_file(
-        sender_ip=sender_ip,
-        recipient_ip=target_ip,
+        sender_ip=sender_client_id,
+        recipient_ip=target_client_id,
         attachment=attachment,
         caption=(caption or "").strip() or None,
     )
@@ -246,14 +294,29 @@ async def upload_file(
 @app.websocket("/ws")
 async def websocket_chat(websocket: WebSocket) -> None:
     await websocket.accept()
-    client_ip = _client_ip_from_websocket(websocket)
+    client_network_ip = _client_ip_from_websocket(websocket)
     user_agent = websocket.headers.get("user-agent", "")
+    client_id = _pick_client_id(
+        request_ip=client_network_ip,
+        provided_id=websocket.query_params.get("device_id"),
+    )
+    client_device_name = _normalize_device_name(websocket.query_params.get("device_name")) or client_id
 
-    initial_state = await chat_manager.register(client_ip, websocket, user_agent)
+    initial_state = await chat_manager.register(
+        client_id,
+        websocket,
+        user_agent,
+        network_ip=client_network_ip,
+        device_name=client_device_name,
+    )
     await websocket.send_json(
         {
             "type": "hello",
-            "me": {"ip": client_ip},
+            "me": {
+                "id": client_id,
+                "ip": client_network_ip,
+                "device_name": client_device_name,
+            },
             "users": initial_state["users"],
             "messages": initial_state["messages"],
         }
@@ -268,22 +331,22 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 text = (payload.get("text") or "").strip()
                 if not text:
                     continue
-                recipient_ip = payload.get("recipient_ip")
-                target_ip = _normalize_optional_ip(recipient_ip)
-                await chat_manager.send_text(sender_ip=client_ip, text=text, recipient_ip=target_ip)
+                recipient_raw = payload.get("recipient_id") or payload.get("recipient_ip")
+                target_id = _normalize_recipient_id(recipient_raw)
+                await chat_manager.send_text(sender_ip=client_id, text=text, recipient_ip=target_id)
                 continue
 
             if event_type == "send_encrypted_message":
-                recipient_ip = payload.get("recipient_ip")
-                target_ip = _normalize_optional_ip(recipient_ip)
+                recipient_raw = payload.get("recipient_id") or payload.get("recipient_ip")
+                target_id = _normalize_recipient_id(recipient_raw)
                 encrypted = _validate_encrypted_payload(payload.get("encrypted"))
-                if target_ip is None or encrypted is None:
+                if target_id is None or encrypted is None:
                     continue
                 if not _has_nonempty_str_fields(encrypted, {"iv", "aad", "ciphertext"}):
                     continue
                 await chat_manager.send_encrypted_text(
-                    sender_ip=client_ip,
-                    recipient_ip=target_ip,
+                    sender_ip=client_id,
+                    recipient_ip=target_id,
                     encrypted=encrypted,
                 )
                 continue
@@ -293,17 +356,17 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 key_fingerprint = _clean_key_fingerprint(payload.get("key_fingerprint"))
                 if public_key and key_fingerprint:
                     await chat_manager.update_identity_key(
-                        ip=client_ip,
+                        client_id=client_id,
                         public_key=public_key,
                         key_fingerprint=key_fingerprint,
                     )
                 continue
 
             if event_type == "typing":
-                recipient_ip = payload.get("recipient_ip")
-                target_ip = _normalize_optional_ip(recipient_ip)
+                recipient_raw = payload.get("recipient_id") or payload.get("recipient_ip")
+                target_id = _normalize_recipient_id(recipient_raw)
                 is_typing = bool(payload.get("is_typing"))
-                await chat_manager.send_typing(sender_ip=client_ip, recipient_ip=target_ip, is_typing=is_typing)
+                await chat_manager.send_typing(sender_ip=client_id, recipient_ip=target_id, is_typing=is_typing)
                 continue
 
             if event_type == "ping":
@@ -313,4 +376,4 @@ async def websocket_chat(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        await chat_manager.unregister(client_ip, websocket)
+        await chat_manager.unregister(client_id, websocket)

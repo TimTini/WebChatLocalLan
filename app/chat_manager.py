@@ -17,39 +17,52 @@ class ChatManager:
         self._history: deque[ChatMessage] = deque(maxlen=max_history)
         self._lock = asyncio.Lock()
 
-    async def register(self, ip: str, websocket: WebSocket, user_agent: str = "") -> dict[str, Any]:
+    async def register(
+        self,
+        client_id: str,
+        websocket: WebSocket,
+        user_agent: str = "",
+        network_ip: str = "",
+        device_name: str = "",
+    ) -> dict[str, Any]:
         now = utc_now_iso()
         async with self._lock:
-            sockets = self._clients.setdefault(ip, set())
+            sockets = self._clients.setdefault(client_id, set())
             sockets.add(websocket)
 
-            if ip in self._presence:
-                presence = self._presence[ip]
+            if client_id in self._presence:
+                presence = self._presence[client_id]
                 presence.last_seen = now
                 presence.connections = len(sockets)
                 if user_agent:
                     presence.user_agent = user_agent
+                if network_ip:
+                    presence.network_ip = network_ip
+                if device_name:
+                    presence.device_name = device_name
             else:
-                self._presence[ip] = UserPresence(
-                    ip=ip,
+                self._presence[client_id] = UserPresence(
+                    ip=client_id,
                     first_seen=now,
                     last_seen=now,
                     connections=len(sockets),
                     user_agent=user_agent,
+                    network_ip=network_ip,
+                    device_name=device_name,
                 )
 
             users = self._serialize_presence()
-            messages = self._serialize_history_for(ip)
+            messages = self._serialize_history_for(client_id)
 
         await self.broadcast_presence(users)
         return {"users": users, "messages": messages}
 
-    async def unregister(self, ip: str, websocket: WebSocket) -> None:
+    async def unregister(self, client_id: str, websocket: WebSocket) -> None:
         now = utc_now_iso()
         should_broadcast = False
 
         async with self._lock:
-            sockets = self._clients.get(ip)
+            sockets = self._clients.get(client_id)
             if sockets is None:
                 return
 
@@ -57,12 +70,12 @@ class ChatManager:
             should_broadcast = True
 
             if sockets:
-                presence = self._presence[ip]
+                presence = self._presence[client_id]
                 presence.last_seen = now
                 presence.connections = len(sockets)
             else:
-                self._clients.pop(ip, None)
-                self._presence.pop(ip, None)
+                self._clients.pop(client_id, None)
+                self._presence.pop(client_id, None)
 
             users = self._serialize_presence()
 
@@ -71,12 +84,12 @@ class ChatManager:
 
     async def update_identity_key(
         self,
-        ip: str,
+        client_id: str,
         public_key: dict[str, Any] | None,
         key_fingerprint: str | None,
     ) -> None:
         async with self._lock:
-            presence = self._presence.get(ip)
+            presence = self._presence.get(client_id)
             if presence is None:
                 return
             presence.public_key = public_key

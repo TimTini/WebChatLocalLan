@@ -16,6 +16,8 @@ class UserPresence:
     last_seen: str
     connections: int
     user_agent: str = ""
+    network_ip: str = ""
+    device_name: str = ""
     public_key: dict[str, Any] | None = None
     key_fingerprint: str | None = None
 
@@ -26,6 +28,8 @@ class UserPresence:
             "last_seen": self.last_seen,
             "connections": self.connections,
             "user_agent": self.user_agent,
+            "network_ip": self.network_ip,
+            "device_name": self.device_name,
             "public_key": self.public_key,
             "key_fingerprint": self.key_fingerprint,
         }
