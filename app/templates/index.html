@@ -14,7 +14,7 @@
           <p class="brand-label">WebChat</p>
           <h1>Local LAN Messenger</h1>
         </div>
-        <button id="close-sidebar" class="icon-btn close-sidebar" type="button" aria-label="Đóng danh sách phòng">Dong</button>
+        <button id="close-sidebar" class="icon-btn close-sidebar" type="button" aria-label="Đóng danh sách phòng">Đóng</button>
       </div>
 
       <section class="identity-card">
@@ -59,15 +59,25 @@
       <p id="typing-hint" class="typing-hint"></p>
       <section id="messages" class="messages"></section>
 
-      <form id="send-form" class="send-form">
-        <input id="message-input" type="text" autocomplete="off" placeholder="Nhập tin nhắn..." />
-        <button type="submit" class="send-btn">Gửi</button>
-      </form>
-
-      <form id="upload-form" class="upload-form">
-        <input id="file-input" type="file" />
-        <input id="file-caption" type="text" placeholder="Ghi chú file (tuỳ chọn)" />
-        <button type="submit" class="send-btn">Gửi file</button>
+      <form id="composer-form" class="composer-form">
+        <input id="file-input" type="file" hidden />
+        <div class="composer-shell">
+          <button id="attach-btn" class="icon-btn attach-btn" type="button" aria-label="Đính kèm file">+</button>
+          <div class="composer-main">
+            <div id="file-preview" class="file-preview" hidden>
+              <span class="file-preview-label">Tệp đính kèm</span>
+              <span id="file-preview-name" class="file-preview-name"></span>
+              <button id="remove-file-btn" class="file-remove-btn" type="button" aria-label="Bỏ tệp">x</button>
+            </div>
+            <textarea
+              id="message-input"
+              rows="1"
+              autocomplete="off"
+              placeholder="Nhập tin nhắn hoặc ghi chú file..."
+            ></textarea>
+          </div>
+          <button id="send-btn" type="submit" class="send-btn">Gửi</button>
+        </div>
       </form>
     </main>
   </div>

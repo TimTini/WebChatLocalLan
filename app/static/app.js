@@ -37,10 +37,13 @@ const elements = {
   typingHint: document.getElementById("typing-hint"),
   messages: document.getElementById("messages"),
   messageInput: document.getElementById("message-input"),
-  sendForm: document.getElementById("send-form"),
-  uploadForm: document.getElementById("upload-form"),
+  composerForm: document.getElementById("composer-form"),
   fileInput: document.getElementById("file-input"),
-  fileCaption: document.getElementById("file-caption"),
+  filePreview: document.getElementById("file-preview"),
+  filePreviewName: document.getElementById("file-preview-name"),
+  attachBtn: document.getElementById("attach-btn"),
+  removeFileBtn: document.getElementById("remove-file-btn"),
+  sendBtn: document.getElementById("send-btn"),
   openSidebarBtn: document.getElementById("open-sidebar"),
   closeSidebarBtn: document.getElementById("close-sidebar"),
   sidebarBackdrop: document.getElementById("sidebar-backdrop"),
@@ -387,7 +390,7 @@ function roomModeForRecipient(recipientId) {
       subtitle: "Tin nhan cho toan bo thiet bi trong LAN",
       security: "Public",
       mode: "public",
-      inputPlaceholder: "Nhap tin nhan cong khai...",
+      inputPlaceholder: "Nhap tin nhan cong khai hoac them ghi chu file...",
     };
   }
 
@@ -399,7 +402,7 @@ function roomModeForRecipient(recipientId) {
       subtitle: "Che do rieng tu E2EE dang bat",
       security: "Private E2EE",
       mode: "secure",
-      inputPlaceholder: "Nhap tin nhan rieng da ma hoa...",
+      inputPlaceholder: "Nhap tin nhan rieng da ma hoa hoac ghi chu file...",
     };
   }
   if (peerIdentity) {
@@ -408,7 +411,7 @@ function roomModeForRecipient(recipientId) {
       subtitle: "Peer co key, thiet bi nay se gui private thuong",
       security: "Private",
       mode: "private",
-      inputPlaceholder: "Nhap tin nhan rieng...",
+      inputPlaceholder: "Nhap tin nhan rieng hoac ghi chu file...",
     };
   }
   return {
@@ -416,7 +419,7 @@ function roomModeForRecipient(recipientId) {
     subtitle: "Peer chua co key, se gui private thuong",
     security: "Private",
     mode: "private",
-    inputPlaceholder: "Nhap tin nhan rieng...",
+    inputPlaceholder: "Nhap tin nhan rieng hoac ghi chu file...",
   };
 }
 
@@ -528,6 +531,54 @@ function formatBytes(bytes) {
     unit += 1;
   }
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+function pendingFile() {
+  return elements.fileInput?.files?.[0] || null;
+}
+
+function autoResizeComposer() {
+  if (!elements.messageInput) {
+    return;
+  }
+  elements.messageInput.style.height = "auto";
+  const maxHeight = 150;
+  const nextHeight = Math.min(elements.messageInput.scrollHeight, maxHeight);
+  elements.messageInput.style.height = `${nextHeight}px`;
+  elements.messageInput.style.overflowY = elements.messageInput.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
+function updateComposerState() {
+  if (!elements.sendBtn) {
+    return;
+  }
+  const hasText = elements.messageInput.value.trim().length > 0;
+  const hasFile = Boolean(pendingFile());
+  elements.sendBtn.disabled = !hasText && !hasFile;
+}
+
+function updateFilePreview() {
+  if (!elements.filePreview || !elements.filePreviewName) {
+    return;
+  }
+  const file = pendingFile();
+  if (!file) {
+    elements.filePreview.hidden = true;
+    elements.filePreviewName.textContent = "";
+    updateComposerState();
+    return;
+  }
+  elements.filePreview.hidden = false;
+  elements.filePreviewName.textContent = `${file.name} (${formatBytes(file.size)})`;
+  updateComposerState();
+}
+
+function clearComposerFile() {
+  if (!elements.fileInput) {
+    return;
+  }
+  elements.fileInput.value = "";
+  updateFilePreview();
 }
 
 function isVisibleInCurrentRoom(message) {
@@ -1153,13 +1204,7 @@ if (elements.sidebarBackdrop) {
   });
 }
 
-elements.sendForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const text = elements.messageInput.value.trim();
-  if (!text) {
-    return;
-  }
-
+async function sendTextMessage(text) {
   let sent = false;
   if (state.activeRecipient) {
     if (canSendEncryptedTo(state.activeRecipient)) {
@@ -1172,7 +1217,7 @@ elements.sendForm.addEventListener("submit", async (event) => {
         });
       } catch (error) {
         setStatus(String(error?.message || error || "E2EE send failed"));
-        return;
+        return false;
       }
     } else {
       sent = sendSocketJson({
@@ -1188,44 +1233,16 @@ elements.sendForm.addEventListener("submit", async (event) => {
       recipient_id: null,
     });
   }
+  return sent;
+}
 
-  if (sent) {
-    elements.messageInput.value = "";
-    sendTypingState(false);
-  }
-});
-
-elements.messageInput.addEventListener("input", () => {
-  const hasText = elements.messageInput.value.trim().length > 0;
-  sendTypingState(hasText);
-
-  if (state.typingTimer) {
-    clearTimeout(state.typingTimer);
-    state.typingTimer = null;
-  }
-
-  if (hasText) {
-    state.typingTimer = setTimeout(() => {
-      sendTypingState(false);
-      state.typingTimer = null;
-    }, 900);
-  }
-});
-
-elements.uploadForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const file = elements.fileInput.files?.[0];
-  if (!file) {
-    return;
-  }
-
+async function sendFileMessage(file, caption) {
   const formData = new FormData();
   if (state.deviceProfile?.deviceId) {
     formData.append("device_id", state.deviceProfile.deviceId);
   }
 
   if (state.activeRecipient) {
-    const caption = elements.fileCaption.value.trim();
     if (canSendEncryptedTo(state.activeRecipient)) {
       try {
         const encrypted = await encryptPrivateFile(file, state.activeRecipient, caption);
@@ -1234,7 +1251,7 @@ elements.uploadForm.addEventListener("submit", async (event) => {
         formData.append("encrypted_payload", JSON.stringify(encrypted.encryptedPayload));
       } catch (error) {
         setStatus(String(error?.message || error || "E2EE file encrypt failed"));
-        return;
+        return false;
       }
     } else {
       formData.append("file", file);
@@ -1245,7 +1262,6 @@ elements.uploadForm.addEventListener("submit", async (event) => {
     }
   } else {
     formData.append("file", file);
-    const caption = elements.fileCaption.value.trim();
     if (caption) {
       formData.append("caption", caption);
     }
@@ -1261,16 +1277,92 @@ elements.uploadForm.addEventListener("submit", async (event) => {
     if (!response.ok || !payload.ok) {
       const detail = payload?.detail || "Khong the upload file.";
       setStatus(String(detail));
-      return;
+      return false;
     }
     addMessage(payload.message);
     renderMessages();
-    elements.fileInput.value = "";
-    elements.fileCaption.value = "";
+    return true;
   } catch (_) {
     setStatus("Upload loi, kiem tra lai ket noi.");
+    return false;
+  }
+}
+
+if (elements.composerForm) {
+  elements.composerForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = elements.messageInput.value.trim();
+    const file = pendingFile();
+
+    if (!text && !file) {
+      return;
+    }
+
+    let sent = false;
+    if (file) {
+      sent = await sendFileMessage(file, text);
+    } else if (text) {
+      sent = await sendTextMessage(text);
+    }
+
+    if (!sent) {
+      return;
+    }
+
+    elements.messageInput.value = "";
+    autoResizeComposer();
+    if (file) {
+      clearComposerFile();
+    }
+    updateComposerState();
+    sendTypingState(false);
+  });
+}
+
+elements.messageInput.addEventListener("input", () => {
+  const hasText = elements.messageInput.value.trim().length > 0;
+  sendTypingState(hasText);
+  autoResizeComposer();
+  updateComposerState();
+
+  if (state.typingTimer) {
+    clearTimeout(state.typingTimer);
+    state.typingTimer = null;
+  }
+
+  if (hasText) {
+    state.typingTimer = setTimeout(() => {
+      sendTypingState(false);
+      state.typingTimer = null;
+    }, 900);
   }
 });
+
+elements.messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    elements.composerForm?.requestSubmit();
+  }
+});
+
+if (elements.attachBtn) {
+  elements.attachBtn.addEventListener("click", () => {
+    elements.fileInput?.click();
+  });
+}
+
+if (elements.fileInput) {
+  elements.fileInput.addEventListener("change", () => {
+    updateFilePreview();
+    updateComposerState();
+  });
+}
+
+if (elements.removeFileBtn) {
+  elements.removeFileBtn.addEventListener("click", () => {
+    clearComposerFile();
+  });
+}
 
 function initializeDeviceProfile() {
   const profile = loadOrCreateDeviceProfile();
@@ -1304,6 +1396,9 @@ window.addEventListener("beforeunload", () => {
 async function bootstrap() {
   setSidebarOpen(false);
   initializeDeviceProfile();
+  autoResizeComposer();
+  updateFilePreview();
+  updateComposerState();
   try {
     await initializeE2EEIdentity();
   } catch (_) {
