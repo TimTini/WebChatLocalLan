@@ -8,40 +8,71 @@
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
-      <h1>LAN Chat</h1>
-      <p class="me-line">Thiết bị của bạn: <strong id="my-ip">...</strong></p>
-      <p class="me-line">Fingerprint: <strong id="my-fingerprint">khởi tạo...</strong></p>
-      <p class="status-line">Kết nối: <span id="ws-status">Đang kết nối...</span></p>
-      <p class="status-line">E2EE: chat riêng + file riêng</p>
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-head">
+        <div class="brand">
+          <p class="brand-label">WebChat</p>
+          <h1>Local LAN Messenger</h1>
+        </div>
+        <button id="close-sidebar" class="icon-btn close-sidebar" type="button" aria-label="Đóng danh sách phòng">Dong</button>
+      </div>
+
+      <section class="identity-card">
+        <p class="card-label">Thiết bị của bạn</p>
+        <p class="card-main" id="my-ip">...</p>
+        <p class="card-note">Fingerprint</p>
+        <p class="card-sub" id="my-fingerprint">khởi tạo...</p>
+      </section>
+
+      <section class="security-card">
+        <p class="card-note">Bảo mật</p>
+        <p class="card-main">Chat riêng dùng E2EE khi cả 2 bên có key</p>
+      </section>
+
+      <div class="rooms-head">
+        <h2>Hội thoại</h2>
+        <span id="online-count" class="online-pill">0 online</span>
+      </div>
 
       <div class="room-list">
-        <button class="room-btn active" data-room="public"># Public</button>
+        <button class="room-btn active" data-room="public" type="button">
+          <span class="room-title"># Public</span>
+          <span class="room-detail">Tin nhắn cho toàn bộ LAN</span>
+        </button>
         <div id="users"></div>
       </div>
     </aside>
 
     <main class="chat-panel">
       <header class="chat-header">
-        <h2 id="room-title">Phòng công khai</h2>
-        <p id="typing-hint"></p>
+        <button id="open-sidebar" class="icon-btn open-sidebar" type="button">Danh bạ</button>
+        <div class="chat-room-meta">
+          <h2 id="room-title">Phòng công khai</h2>
+          <p id="room-subtitle">Tin nhắn cho toàn bộ LAN</p>
+        </div>
+        <div class="header-status">
+          <span id="room-security" class="room-security" data-mode="public">Public</span>
+          <span id="ws-status" class="socket-pill" data-state="connecting">Đang kết nối...</span>
+        </div>
       </header>
 
+      <p id="typing-hint" class="typing-hint"></p>
       <section id="messages" class="messages"></section>
 
       <form id="send-form" class="send-form">
         <input id="message-input" type="text" autocomplete="off" placeholder="Nhập tin nhắn..." />
-        <button type="submit">Gửi</button>
+        <button type="submit" class="send-btn">Gửi</button>
       </form>
 
       <form id="upload-form" class="upload-form">
         <input id="file-input" type="file" />
         <input id="file-caption" type="text" placeholder="Ghi chú file (tuỳ chọn)" />
-        <button type="submit">Gửi file</button>
+        <button type="submit" class="send-btn">Gửi file</button>
       </form>
     </main>
   </div>
 
+  <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

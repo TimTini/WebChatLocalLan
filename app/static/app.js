@@ -22,14 +22,18 @@ const state = {
   textDecryptCache: new Map(),
   fileDecryptCache: new Map(),
   deviceProfile: null,
+  sidebarOpen: false,
 };
 
 const elements = {
   myIp: document.getElementById("my-ip"),
   myFingerprint: document.getElementById("my-fingerprint"),
   wsStatus: document.getElementById("ws-status"),
+  onlineCount: document.getElementById("online-count"),
   users: document.getElementById("users"),
   roomTitle: document.getElementById("room-title"),
+  roomSubtitle: document.getElementById("room-subtitle"),
+  roomSecurity: document.getElementById("room-security"),
   typingHint: document.getElementById("typing-hint"),
   messages: document.getElementById("messages"),
   messageInput: document.getElementById("message-input"),
@@ -37,8 +41,13 @@ const elements = {
   uploadForm: document.getElementById("upload-form"),
   fileInput: document.getElementById("file-input"),
   fileCaption: document.getElementById("file-caption"),
+  openSidebarBtn: document.getElementById("open-sidebar"),
+  closeSidebarBtn: document.getElementById("close-sidebar"),
+  sidebarBackdrop: document.getElementById("sidebar-backdrop"),
   publicBtn: document.querySelector('[data-room="public"]'),
 };
+
+const MOBILE_LAYOUT_QUERY = "(max-width: 900px)";
 
 function socketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -54,6 +63,29 @@ function socketUrl() {
 
 function setStatus(text) {
   elements.wsStatus.textContent = text;
+  const normalized = String(text || "").toLowerCase();
+  if (normalized.includes("da ket noi")) {
+    elements.wsStatus.dataset.state = "online";
+  } else if (normalized.includes("loi")) {
+    elements.wsStatus.dataset.state = "error";
+  } else {
+    elements.wsStatus.dataset.state = "connecting";
+  }
+}
+
+function isMobileLayout() {
+  return window.matchMedia(MOBILE_LAYOUT_QUERY).matches;
+}
+
+function setSidebarOpen(isOpen) {
+  state.sidebarOpen = Boolean(isOpen);
+  document.body.classList.toggle("sidebar-open", state.sidebarOpen);
+}
+
+function closeSidebarIfNeeded() {
+  if (isMobileLayout()) {
+    setSidebarOpen(false);
+  }
 }
 
 function toSlug(value) {
@@ -348,18 +380,61 @@ function updateTypingHint(text) {
   elements.typingHint.textContent = text || "";
 }
 
-function updateRoomUi() {
-  if (state.activeRecipient === null) {
-    elements.roomTitle.textContent = "Phong cong khai";
-  } else {
-    const peer = getRecipientIdentity(state.activeRecipient);
-    const peerLabel = formatUserLabel(state.activeRecipient);
-    if (peer) {
-      elements.roomTitle.textContent = `Chat rieng voi ${peerLabel} (E2EE)`;
-    } else {
-      elements.roomTitle.textContent = `Chat rieng voi ${peerLabel} (chua co key)`;
-    }
+function roomModeForRecipient(recipientId) {
+  if (recipientId === null) {
+    return {
+      title: "Phong cong khai",
+      subtitle: "Tin nhan cho toan bo thiet bi trong LAN",
+      security: "Public",
+      mode: "public",
+      inputPlaceholder: "Nhap tin nhan cong khai...",
+    };
   }
+
+  const peerLabel = formatUserLabel(recipientId);
+  const peerIdentity = getRecipientIdentity(recipientId);
+  if (peerIdentity && state.e2eeReady && state.identity) {
+    return {
+      title: `Chat rieng voi ${peerLabel}`,
+      subtitle: "Che do rieng tu E2EE dang bat",
+      security: "Private E2EE",
+      mode: "secure",
+      inputPlaceholder: "Nhap tin nhan rieng da ma hoa...",
+    };
+  }
+  if (peerIdentity) {
+    return {
+      title: `Chat rieng voi ${peerLabel}`,
+      subtitle: "Peer co key, thiet bi nay se gui private thuong",
+      security: "Private",
+      mode: "private",
+      inputPlaceholder: "Nhap tin nhan rieng...",
+    };
+  }
+  return {
+    title: `Chat rieng voi ${peerLabel}`,
+    subtitle: "Peer chua co key, se gui private thuong",
+    security: "Private",
+    mode: "private",
+    inputPlaceholder: "Nhap tin nhan rieng...",
+  };
+}
+
+function canSendEncryptedTo(recipientId) {
+  return Boolean(recipientId && state.e2eeReady && state.identity && getRecipientIdentity(recipientId));
+}
+
+function updateRoomUi() {
+  const mode = roomModeForRecipient(state.activeRecipient);
+  elements.roomTitle.textContent = mode.title;
+  if (elements.roomSubtitle) {
+    elements.roomSubtitle.textContent = mode.subtitle;
+  }
+  if (elements.roomSecurity) {
+    elements.roomSecurity.textContent = mode.security;
+    elements.roomSecurity.dataset.mode = mode.mode;
+  }
+  elements.messageInput.placeholder = mode.inputPlaceholder;
   updateRoomButtons();
   updateTypingHint("");
 }
@@ -367,6 +442,9 @@ function updateRoomUi() {
 function renderUsers() {
   const previousRecipient = state.activeRecipient;
   elements.users.innerHTML = "";
+  if (elements.onlineCount) {
+    elements.onlineCount.textContent = `${state.users.length} online`;
+  }
 
   const visibleUsers = state.users
     .filter((user) => user.ip !== state.myClientId)
@@ -392,12 +470,25 @@ function renderUsers() {
   visibleUsers.forEach((user) => {
     const button = document.createElement("button");
     button.className = "room-btn";
+    button.type = "button";
     button.dataset.id = user.ip;
-    const e2eeTag = user.key_fingerprint ? " [E2EE]" : " [no-key]";
+    const e2eeReady = Boolean(user.key_fingerprint);
     const shortId = shortClientId(user.ip);
-    const networkIp = user.network_ip || "?";
+    const networkIp = user.network_ip || "unknown";
     const deviceName = user.device_name || "Device";
-    button.textContent = `${deviceName} | ${shortId} | ${networkIp} (${user.connections})${e2eeTag}`;
+    const connectionsLabel = user.connections > 1 ? `${user.connections} ket noi` : "online";
+
+    const title = document.createElement("span");
+    title.className = "room-title";
+    title.textContent = `${deviceName} @${networkIp}`;
+    button.appendChild(title);
+
+    const detail = document.createElement("span");
+    detail.className = "room-detail";
+    detail.classList.add(e2eeReady ? "e2ee-ready" : "e2ee-missing");
+    detail.textContent = `${shortId} | ${connectionsLabel} | ${e2eeReady ? "E2EE san sang" : "Private thuong"}`;
+    button.appendChild(detail);
+
     if (state.activeRecipient === user.ip) {
       button.classList.add("active");
     }
@@ -405,6 +496,7 @@ function renderUsers() {
       state.activeRecipient = user.ip;
       updateRoomUi();
       renderMessages();
+      closeSidebarIfNeeded();
     });
     elements.users.appendChild(button);
   });
@@ -820,6 +912,16 @@ function renderMessages() {
   const frag = document.createDocumentFragment();
   const visibleMessages = state.messages.filter(isVisibleInCurrentRoom);
 
+  if (visibleMessages.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-messages";
+    empty.textContent =
+      state.activeRecipient === null
+        ? "Chua co tin nhan cong khai. Hay bat dau cuoc tro chuyen."
+        : "Chua co tin nhan rieng trong phong nay.";
+    frag.appendChild(empty);
+  }
+
   visibleMessages.forEach((message) => {
     const item = document.createElement("article");
     item.className = "message";
@@ -1030,7 +1132,26 @@ elements.publicBtn.addEventListener("click", () => {
   state.activeRecipient = null;
   updateRoomUi();
   renderMessages();
+  closeSidebarIfNeeded();
 });
+
+if (elements.openSidebarBtn) {
+  elements.openSidebarBtn.addEventListener("click", () => {
+    setSidebarOpen(true);
+  });
+}
+
+if (elements.closeSidebarBtn) {
+  elements.closeSidebarBtn.addEventListener("click", () => {
+    setSidebarOpen(false);
+  });
+}
+
+if (elements.sidebarBackdrop) {
+  elements.sidebarBackdrop.addEventListener("click", () => {
+    setSidebarOpen(false);
+  });
+}
 
 elements.sendForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1041,20 +1162,24 @@ elements.sendForm.addEventListener("submit", async (event) => {
 
   let sent = false;
   if (state.activeRecipient) {
-    if (!state.e2eeReady || !state.identity) {
-      setStatus("Trinh duyet khong ho tro E2EE.");
-      return;
-    }
-    try {
-      const encrypted = await encryptPrivateText(text, state.activeRecipient);
+    if (canSendEncryptedTo(state.activeRecipient)) {
+      try {
+        const encrypted = await encryptPrivateText(text, state.activeRecipient);
+        sent = sendSocketJson({
+          type: "send_encrypted_message",
+          recipient_id: state.activeRecipient,
+          encrypted,
+        });
+      } catch (error) {
+        setStatus(String(error?.message || error || "E2EE send failed"));
+        return;
+      }
+    } else {
       sent = sendSocketJson({
-        type: "send_encrypted_message",
+        type: "send_message",
+        text,
         recipient_id: state.activeRecipient,
-        encrypted,
       });
-    } catch (error) {
-      setStatus(String(error?.message || error || "E2EE send failed"));
-      return;
     }
   } else {
     sent = sendSocketJson({
@@ -1100,19 +1225,23 @@ elements.uploadForm.addEventListener("submit", async (event) => {
   }
 
   if (state.activeRecipient) {
-    if (!state.e2eeReady || !state.identity) {
-      setStatus("Trinh duyet khong ho tro E2EE.");
-      return;
-    }
-    try {
-      const caption = elements.fileCaption.value.trim();
-      const encrypted = await encryptPrivateFile(file, state.activeRecipient, caption);
-      formData.append("file", encrypted.encryptedBlob, "encrypted.bin");
+    const caption = elements.fileCaption.value.trim();
+    if (canSendEncryptedTo(state.activeRecipient)) {
+      try {
+        const encrypted = await encryptPrivateFile(file, state.activeRecipient, caption);
+        formData.append("file", encrypted.encryptedBlob, "encrypted.bin");
+        formData.append("recipient_id", state.activeRecipient);
+        formData.append("encrypted_payload", JSON.stringify(encrypted.encryptedPayload));
+      } catch (error) {
+        setStatus(String(error?.message || error || "E2EE file encrypt failed"));
+        return;
+      }
+    } else {
+      formData.append("file", file);
       formData.append("recipient_id", state.activeRecipient);
-      formData.append("encrypted_payload", JSON.stringify(encrypted.encryptedPayload));
-    } catch (error) {
-      setStatus(String(error?.message || error || "E2EE file encrypt failed"));
-      return;
+      if (caption) {
+        formData.append("caption", caption);
+      }
     }
   } else {
     formData.append("file", file);
@@ -1148,6 +1277,18 @@ function initializeDeviceProfile() {
   state.deviceProfile = profile;
 }
 
+window.addEventListener("resize", () => {
+  if (!isMobileLayout() && state.sidebarOpen) {
+    setSidebarOpen(false);
+  }
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.sidebarOpen) {
+    setSidebarOpen(false);
+  }
+});
+
 window.setInterval(() => {
   sendSocketJson({ type: "ping" });
 }, 30000);
@@ -1161,6 +1302,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 async function bootstrap() {
+  setSidebarOpen(false);
   initializeDeviceProfile();
   try {
     await initializeE2EEIdentity();
