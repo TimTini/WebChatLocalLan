@@ -42,12 +42,12 @@ Chạy app:
 uv run python main.py
 ```
 
-Mặc định app chạy tại `http://0.0.0.0:9096`.
+Mặc định app chạy tại `http://0.0.0.0:9097`.
 
 ## 2) Biến môi trường
 
 - `WEBCHAT_HOST` (mặc định `0.0.0.0`)
-- `WEBCHAT_PORT` (mặc định `9096`)
+- `WEBCHAT_PORT` (mặc định `9097`)
 - `WEBCHAT_UPLOAD_DIR` (mặc định `./uploads`)
 - `WEBCHAT_MAX_UPLOAD_MB` (mặc định `25`)
 - `WEBCHAT_MAX_HISTORY` (mặc định `500`)
@@ -81,11 +81,11 @@ sudo systemctl status webchat-local-lan.service
 
 1. App phải bind `0.0.0.0`, không phải `127.0.0.1`.
    - Với project này mặc định đã là `WEBCHAT_HOST=0.0.0.0`.
-2. Dùng đúng IP LAN của máy server, ví dụ `http://192.168.1.20:9096` (không dùng `localhost` từ máy khác).
-3. Kiểm tra service/app thật sự đang listen ở `9096`:
-   - Linux: `ss -ltnp | grep 9096`
-   - Windows: `netstat -ano | findstr :9096`
-4. Firewall phải mở inbound TCP `9096` cho profile mạng đang dùng (Private/Public).
+2. Dùng đúng IP LAN của máy server, ví dụ `http://192.168.1.20:9097` (không dùng `localhost` từ máy khác).
+3. Kiểm tra service/app thật sự đang listen ở `9097`:
+   - Linux: `ss -ltnp | grep 9097`
+   - Windows: `netstat -ano | findstr :9097`
+4. Firewall phải mở inbound TCP `9097` cho profile mạng đang dùng (Private/Public).
 5. Hai thiết bị phải cùng subnet và router/AP không bật client isolation / AP isolation.
 6. Nếu chạy qua VM/WSL/container, cần mở port/bridge đúng lớp mạng host.
 

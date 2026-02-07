@@ -8,7 +8,7 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/webchat-local-lan
 Environment=WEBCHAT_HOST=0.0.0.0
-Environment=WEBCHAT_PORT=9096
+Environment=WEBCHAT_PORT=9097
 Environment=WEBCHAT_UPLOAD_DIR=/opt/webchat-local-lan/uploads
 ExecStart=/usr/bin/env uv run --project /opt/webchat-local-lan --no-sync python -u /opt/webchat-local-lan/main.py
 Restart=always
