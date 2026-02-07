@@ -42,12 +42,12 @@ Chạy app:
 uv run python main.py
 ```
 
-Mặc định app chạy tại `http://0.0.0.0:8000`.
+Mặc định app chạy tại `http://0.0.0.0:9096`.
 
 ## 2) Biến môi trường
 
 - `WEBCHAT_HOST` (mặc định `0.0.0.0`)
-- `WEBCHAT_PORT` (mặc định `8000`)
+- `WEBCHAT_PORT` (mặc định `9096`)
 - `WEBCHAT_UPLOAD_DIR` (mặc định `./uploads`)
 - `WEBCHAT_MAX_UPLOAD_MB` (mặc định `25`)
 - `WEBCHAT_MAX_HISTORY` (mặc định `500`)
@@ -77,7 +77,19 @@ python service.py --user www-data
 sudo systemctl status webchat-local-lan.service
 ```
 
-## 4) Luồng sử dụng
+## 4) Không truy cập được từ thiết bị khác (LAN) - kiểm tra nhanh
+
+1. App phải bind `0.0.0.0`, không phải `127.0.0.1`.
+   - Với project này mặc định đã là `WEBCHAT_HOST=0.0.0.0`.
+2. Dùng đúng IP LAN của máy server, ví dụ `http://192.168.1.20:9096` (không dùng `localhost` từ máy khác).
+3. Kiểm tra service/app thật sự đang listen ở `9096`:
+   - Linux: `ss -ltnp | grep 9096`
+   - Windows: `netstat -ano | findstr :9096`
+4. Firewall phải mở inbound TCP `9096` cho profile mạng đang dùng (Private/Public).
+5. Hai thiết bị phải cùng subnet và router/AP không bật client isolation / AP isolation.
+6. Nếu chạy qua VM/WSL/container, cần mở port/bridge đúng lớp mạng host.
+
+## 5) Luồng sử dụng
 
 - Mở web trên các máy cùng LAN.
 - Sidebar hiển thị người online theo IP.
@@ -88,7 +100,7 @@ sudo systemctl status webchat-local-lan.service
   - Private: file được mã hóa phía trình duyệt trước khi upload.
 - Mỗi client có fingerprint khóa ở sidebar. Nếu cần xác minh chống giả mạo, đối chiếu fingerprint giữa 2 máy qua kênh khác.
 
-## 5) Đề xuất nâng cao (nên làm tiếp)
+## 6) Đề xuất nâng cao (nên làm tiếp)
 
 1. Đặt tên hiển thị theo máy (lưu localStorage, vẫn giữ IP làm định danh thật).
 2. Lưu lịch sử vào SQLite (thay vì RAM) để không mất khi restart.
