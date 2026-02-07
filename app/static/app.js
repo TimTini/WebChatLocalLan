@@ -1,0 +1,1044 @@
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+const E2EE_STORAGE_KEY = "webchat_e2ee_identity_v1";
+
+const state = {
+  socket: null,
+  myIp: "",
+  users: [],
+  messages: [],
+  knownMessageIds: new Set(),
+  activeRecipient: null,
+  reconnectTimer: null,
+  typingTimer: null,
+  typingSent: false,
+  typingPeer: null,
+  identity: null,
+  e2eeReady: false,
+  peerPublicKeyCache: new Map(),
+  sharedKeyCache: new Map(),
+  textDecryptCache: new Map(),
+  fileDecryptCache: new Map(),
+};
+
+const elements = {
+  myIp: document.getElementById("my-ip"),
+  myFingerprint: document.getElementById("my-fingerprint"),
+  wsStatus: document.getElementById("ws-status"),
+  users: document.getElementById("users"),
+  roomTitle: document.getElementById("room-title"),
+  typingHint: document.getElementById("typing-hint"),
+  messages: document.getElementById("messages"),
+  messageInput: document.getElementById("message-input"),
+  sendForm: document.getElementById("send-form"),
+  uploadForm: document.getElementById("upload-form"),
+  fileInput: document.getElementById("file-input"),
+  fileCaption: document.getElementById("file-caption"),
+  publicBtn: document.querySelector('[data-room="public"]'),
+};
+
+function socketUrl() {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${window.location.host}/ws`;
+}
+
+function setStatus(text) {
+  elements.wsStatus.textContent = text;
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const keys = Object.keys(value).sort();
+  const parts = keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`);
+  return `{${parts.join(",")}}`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(base64Value) {
+  const binary = atob(base64Value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function utf8ToBase64(text) {
+  return arrayBufferToBase64(textEncoder.encode(text).buffer);
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", textEncoder.encode(text));
+  const bytes = Array.from(new Uint8Array(digest));
+  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function shortFingerprint(fullHex) {
+  const prefix = fullHex.slice(0, 32);
+  const groups = prefix.match(/.{1,4}/g) || [prefix];
+  return groups.join(":");
+}
+
+function isValidPublicJwk(value) {
+  return (
+    value &&
+    typeof value === "object" &&
+    value.kty === "EC" &&
+    value.crv === "P-256" &&
+    typeof value.x === "string" &&
+    typeof value.y === "string"
+  );
+}
+
+async function createIdentity() {
+  const pair = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveKey"]
+  );
+
+  const publicJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const privateJwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+  const fingerprintHex = await sha256Hex(stableStringify(publicJwk));
+  const fingerprint = shortFingerprint(fingerprintHex);
+
+  localStorage.setItem(
+    E2EE_STORAGE_KEY,
+    JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      fingerprint,
+      publicJwk,
+      privateJwk,
+    })
+  );
+
+  return {
+    fingerprint,
+    publicJwk,
+    privateJwk,
+    publicKey: pair.publicKey,
+    privateKey: pair.privateKey,
+  };
+}
+
+async function loadIdentityFromStorage() {
+  const raw = localStorage.getItem(E2EE_STORAGE_KEY);
+  if (!raw) {
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+
+  if (
+    !parsed ||
+    parsed.version !== 1 ||
+    typeof parsed.fingerprint !== "string" ||
+    !isValidPublicJwk(parsed.publicJwk) ||
+    !isValidPublicJwk(parsed.privateJwk)
+  ) {
+    return null;
+  }
+
+  const publicKey = await crypto.subtle.importKey(
+    "jwk",
+    parsed.publicJwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    []
+  );
+  const privateKey = await crypto.subtle.importKey(
+    "jwk",
+    parsed.privateJwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    ["deriveKey"]
+  );
+
+  return {
+    fingerprint: parsed.fingerprint,
+    publicJwk: parsed.publicJwk,
+    privateJwk: parsed.privateJwk,
+    publicKey,
+    privateKey,
+  };
+}
+
+async function initializeE2EEIdentity() {
+  if (!window.crypto || !window.crypto.subtle) {
+    state.e2eeReady = false;
+    elements.myFingerprint.textContent = "khong ho tro";
+    return;
+  }
+
+  let identity = null;
+  try {
+    identity = await loadIdentityFromStorage();
+  } catch (_) {
+    identity = null;
+  }
+  if (!identity) {
+    identity = await createIdentity();
+  }
+
+  state.identity = identity;
+  state.e2eeReady = true;
+  elements.myFingerprint.textContent = identity.fingerprint;
+}
+
+function addMessage(message) {
+  if (!message || !message.message_id) {
+    return;
+  }
+  if (state.knownMessageIds.has(message.message_id)) {
+    return;
+  }
+  state.knownMessageIds.add(message.message_id);
+  state.messages.push(message);
+}
+
+function getUserByIp(ip) {
+  return state.users.find((user) => user.ip === ip) || null;
+}
+
+function getRecipientIdentity(ip) {
+  const user = getUserByIp(ip);
+  if (!user || !isValidPublicJwk(user.public_key) || typeof user.key_fingerprint !== "string") {
+    return null;
+  }
+  return { publicJwk: user.public_key, fingerprint: user.key_fingerprint };
+}
+
+function updateRoomButtons() {
+  elements.publicBtn.classList.toggle("active", state.activeRecipient === null);
+  const roomButtons = elements.users.querySelectorAll(".room-btn");
+  roomButtons.forEach((button) => {
+    const isCurrent = button.dataset.ip === state.activeRecipient;
+    button.classList.toggle("active", isCurrent);
+  });
+}
+
+function updateTypingHint(text) {
+  elements.typingHint.textContent = text || "";
+}
+
+function updateRoomUi() {
+  if (state.activeRecipient === null) {
+    elements.roomTitle.textContent = "Phong cong khai";
+  } else {
+    const peer = getRecipientIdentity(state.activeRecipient);
+    if (peer) {
+      elements.roomTitle.textContent = `Chat rieng voi ${state.activeRecipient} (E2EE)`;
+    } else {
+      elements.roomTitle.textContent = `Chat rieng voi ${state.activeRecipient} (chua co key)`;
+    }
+  }
+  updateRoomButtons();
+  updateTypingHint("");
+}
+
+function renderUsers() {
+  const previousRecipient = state.activeRecipient;
+  elements.users.innerHTML = "";
+
+  const visibleUsers = state.users
+    .filter((user) => user.ip !== state.myIp)
+    .sort((a, b) => a.ip.localeCompare(b.ip));
+
+  if (state.activeRecipient && !visibleUsers.some((user) => user.ip === state.activeRecipient)) {
+    state.activeRecipient = null;
+  }
+
+  if (visibleUsers.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-users";
+    empty.textContent = "Hien chua co nguoi khac online";
+    elements.users.appendChild(empty);
+  }
+
+  visibleUsers.forEach((user) => {
+    const button = document.createElement("button");
+    button.className = "room-btn";
+    button.dataset.ip = user.ip;
+    const e2eeTag = user.key_fingerprint ? " [E2EE]" : " [no-key]";
+    button.textContent = `${user.ip} (${user.connections})${e2eeTag}`;
+    if (state.activeRecipient === user.ip) {
+      button.classList.add("active");
+    }
+    button.addEventListener("click", () => {
+      state.activeRecipient = user.ip;
+      updateRoomUi();
+      renderMessages();
+    });
+    elements.users.appendChild(button);
+  });
+
+  if (previousRecipient !== state.activeRecipient) {
+    updateRoomUi();
+  } else {
+    updateRoomButtons();
+  }
+}
+
+function formatTime(isoString) {
+  try {
+    return new Date(isoString).toLocaleTimeString();
+  } catch (_) {
+    return "";
+  }
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+function isVisibleInCurrentRoom(message) {
+  if (!state.myIp) {
+    return false;
+  }
+  if (state.activeRecipient === null) {
+    return message.recipient_ip === null;
+  }
+  if (!message.recipient_ip) {
+    return false;
+  }
+  return (
+    (message.sender_ip === state.myIp && message.recipient_ip === state.activeRecipient) ||
+    (message.sender_ip === state.activeRecipient && message.recipient_ip === state.myIp)
+  );
+}
+
+function makeMetaLine(message) {
+  const sender = message.sender_ip === state.myIp ? "Ban" : message.sender_ip;
+  const target = message.recipient_ip ? ` -> ${message.recipient_ip}` : " -> public";
+  const e2eeTag = message.message_type.startsWith("e2ee_") ? " | E2EE" : "";
+  return `${sender}${target} | ${formatTime(message.timestamp)}${e2eeTag}`;
+}
+
+function mediaKindFromMime(mimeType) {
+  if (mimeType.startsWith("image/")) {
+    return "image";
+  }
+  if (mimeType.startsWith("video/")) {
+    return "video";
+  }
+  if (mimeType.startsWith("audio/")) {
+    return "audio";
+  }
+  return "file";
+}
+
+async function importPeerPublicKey(peerJwk, peerFingerprint) {
+  const cacheKey = `pub:${peerFingerprint}`;
+  if (state.peerPublicKeyCache.has(cacheKey)) {
+    return state.peerPublicKeyCache.get(cacheKey);
+  }
+  const imported = await crypto.subtle.importKey(
+    "jwk",
+    peerJwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    []
+  );
+  state.peerPublicKeyCache.set(cacheKey, imported);
+  return imported;
+}
+
+async function deriveSharedKey(peerJwk, peerFingerprint) {
+  if (!state.e2eeReady || !state.identity) {
+    throw new Error("E2EE is not ready");
+  }
+  const cacheKey = `shared:${state.identity.fingerprint}:${peerFingerprint}`;
+  if (state.sharedKeyCache.has(cacheKey)) {
+    return state.sharedKeyCache.get(cacheKey);
+  }
+  const peerPublic = await importPeerPublicKey(peerJwk, peerFingerprint);
+  const sharedKey = await crypto.subtle.deriveKey(
+    { name: "ECDH", public: peerPublic },
+    state.identity.privateKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+  state.sharedKeyCache.set(cacheKey, sharedKey);
+  return sharedKey;
+}
+
+function buildEnvelopeBase(peer) {
+  return {
+    version: 1,
+    alg: "AES-GCM",
+    curve: "P-256",
+    sender_fingerprint: state.identity.fingerprint,
+    recipient_fingerprint: peer.fingerprint,
+    sender_public_jwk: state.identity.publicJwk,
+    recipient_public_jwk: peer.publicJwk,
+  };
+}
+
+function randomIv() {
+  return crypto.getRandomValues(new Uint8Array(12));
+}
+
+async function encryptPrivateText(text, recipientIp) {
+  const peer = getRecipientIdentity(recipientIp);
+  if (!peer) {
+    throw new Error("Nguoi nhan chua cong bo key E2EE.");
+  }
+
+  const sharedKey = await deriveSharedKey(peer.publicJwk, peer.fingerprint);
+  const iv = randomIv();
+  const aad = textEncoder.encode(`webchat:e2ee:text:v1:${state.myIp}->${recipientIp}`);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: aad },
+    sharedKey,
+    textEncoder.encode(text)
+  );
+
+  return {
+    ...buildEnvelopeBase(peer),
+    iv: arrayBufferToBase64(iv.buffer),
+    aad: arrayBufferToBase64(aad.buffer),
+    ciphertext: arrayBufferToBase64(ciphertext),
+  };
+}
+
+function getPeerFromEncryptedMessage(message) {
+  const encrypted = message.encrypted || {};
+  if (message.sender_ip === state.myIp) {
+    return {
+      publicJwk: encrypted.recipient_public_jwk,
+      fingerprint: encrypted.recipient_fingerprint,
+    };
+  }
+  return {
+    publicJwk: encrypted.sender_public_jwk,
+    fingerprint: encrypted.sender_fingerprint,
+  };
+}
+
+async function decryptPrivateText(message) {
+  if (!message.encrypted) {
+    throw new Error("Missing encrypted payload");
+  }
+  const encrypted = message.encrypted;
+  const peer = getPeerFromEncryptedMessage(message);
+  if (!isValidPublicJwk(peer.publicJwk) || typeof peer.fingerprint !== "string") {
+    throw new Error("Peer key not found");
+  }
+  const sharedKey = await deriveSharedKey(peer.publicJwk, peer.fingerprint);
+  const iv = new Uint8Array(base64ToArrayBuffer(encrypted.iv));
+  const aad = new Uint8Array(base64ToArrayBuffer(encrypted.aad));
+  const ciphertext = base64ToArrayBuffer(encrypted.ciphertext);
+  const plainBuffer = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, additionalData: aad },
+    sharedKey,
+    ciphertext
+  );
+  return textDecoder.decode(plainBuffer);
+}
+
+function ensureTextDecryption(message) {
+  if (state.textDecryptCache.has(message.message_id)) {
+    return;
+  }
+  state.textDecryptCache.set(message.message_id, { status: "loading" });
+  decryptPrivateText(message)
+    .then((text) => {
+      state.textDecryptCache.set(message.message_id, { status: "ok", text });
+      renderMessages();
+    })
+    .catch((error) => {
+      state.textDecryptCache.set(message.message_id, {
+        status: "error",
+        error: String(error?.message || error || "decrypt failed"),
+      });
+      renderMessages();
+    });
+}
+
+function renderPlainAttachment(message) {
+  if (!message.attachment) {
+    return null;
+  }
+  const attachment = message.attachment;
+  const wrapper = document.createElement("div");
+  wrapper.className = "attachment";
+
+  if (attachment.kind === "image") {
+    const img = document.createElement("img");
+    img.src = attachment.url;
+    img.alt = attachment.original_name;
+    img.loading = "lazy";
+    wrapper.appendChild(img);
+  } else if (attachment.kind === "video") {
+    const video = document.createElement("video");
+    video.controls = true;
+    video.src = attachment.url;
+    wrapper.appendChild(video);
+  } else if (attachment.kind === "audio") {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.src = attachment.url;
+    wrapper.appendChild(audio);
+  }
+
+  const fileLink = document.createElement("a");
+  fileLink.href = attachment.url;
+  fileLink.target = "_blank";
+  fileLink.rel = "noopener noreferrer";
+  fileLink.textContent = `${attachment.original_name} (${formatBytes(attachment.size)})`;
+  wrapper.appendChild(fileLink);
+
+  return wrapper;
+}
+
+async function encryptPrivateFile(file, recipientIp, caption) {
+  const peer = getRecipientIdentity(recipientIp);
+  if (!peer) {
+    throw new Error("Nguoi nhan chua cong bo key E2EE.");
+  }
+
+  const sharedKey = await deriveSharedKey(peer.publicJwk, peer.fingerprint);
+  const fileBytes = await file.arrayBuffer();
+  const fileIv = randomIv();
+  const fileAad = textEncoder.encode(`webchat:e2ee:file:v1:${state.myIp}->${recipientIp}`);
+  const encryptedFile = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: fileIv, additionalData: fileAad },
+    sharedKey,
+    fileBytes
+  );
+
+  const metadata = {
+    original_name: file.name || "file",
+    mime_type: file.type || "application/octet-stream",
+    size: file.size,
+    caption: caption || null,
+  };
+  const metadataIv = randomIv();
+  const metadataAad = textEncoder.encode(`webchat:e2ee:file-meta:v1:${state.myIp}->${recipientIp}`);
+  const metadataCiphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: metadataIv, additionalData: metadataAad },
+    sharedKey,
+    textEncoder.encode(JSON.stringify(metadata))
+  );
+
+  return {
+    encryptedBlob: new Blob([encryptedFile], { type: "application/octet-stream" }),
+    encryptedPayload: {
+      ...buildEnvelopeBase(peer),
+      file_iv: arrayBufferToBase64(fileIv.buffer),
+      file_aad: arrayBufferToBase64(fileAad.buffer),
+      metadata_iv: arrayBufferToBase64(metadataIv.buffer),
+      metadata_aad: arrayBufferToBase64(metadataAad.buffer),
+      metadata_ciphertext: arrayBufferToBase64(metadataCiphertext),
+    },
+  };
+}
+
+async function decryptPrivateFile(message) {
+  const encrypted = message.encrypted || {};
+  const peer = getPeerFromEncryptedMessage(message);
+  if (!isValidPublicJwk(peer.publicJwk) || typeof peer.fingerprint !== "string") {
+    throw new Error("Peer key not found");
+  }
+  const sharedKey = await deriveSharedKey(peer.publicJwk, peer.fingerprint);
+
+  const response = await fetch(message.attachment.url);
+  if (!response.ok) {
+    throw new Error(`Cannot fetch encrypted file (${response.status})`);
+  }
+  const encryptedFileBuffer = await response.arrayBuffer();
+  const fileIv = new Uint8Array(base64ToArrayBuffer(encrypted.file_iv));
+  const fileAad = new Uint8Array(base64ToArrayBuffer(encrypted.file_aad));
+  const plainFileBuffer = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fileIv, additionalData: fileAad },
+    sharedKey,
+    encryptedFileBuffer
+  );
+
+  const metadataIv = new Uint8Array(base64ToArrayBuffer(encrypted.metadata_iv));
+  const metadataAad = new Uint8Array(base64ToArrayBuffer(encrypted.metadata_aad));
+  const metadataCipher = base64ToArrayBuffer(encrypted.metadata_ciphertext);
+  const plainMetaBuffer = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: metadataIv, additionalData: metadataAad },
+    sharedKey,
+    metadataCipher
+  );
+
+  const metadataText = textDecoder.decode(plainMetaBuffer);
+  const metadata = JSON.parse(metadataText);
+  const mimeType =
+    typeof metadata.mime_type === "string" && metadata.mime_type
+      ? metadata.mime_type
+      : "application/octet-stream";
+  const blob = new Blob([plainFileBuffer], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+
+  return {
+    url: objectUrl,
+    name: typeof metadata.original_name === "string" ? metadata.original_name : "file",
+    size: Number.isFinite(metadata.size) ? metadata.size : blob.size,
+    mimeType,
+    kind: mediaKindFromMime(mimeType),
+    caption: typeof metadata.caption === "string" ? metadata.caption : null,
+  };
+}
+
+function ensureFileDecryption(message) {
+  const cached = state.fileDecryptCache.get(message.message_id);
+  if (cached) {
+    return;
+  }
+  state.fileDecryptCache.set(message.message_id, { status: "loading" });
+  decryptPrivateFile(message)
+    .then((data) => {
+      state.fileDecryptCache.set(message.message_id, { status: "ok", data });
+      renderMessages();
+    })
+    .catch((error) => {
+      state.fileDecryptCache.set(message.message_id, {
+        status: "error",
+        error: String(error?.message || error || "decrypt failed"),
+      });
+      renderMessages();
+    });
+}
+
+function renderEncryptedFileNode(message) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "attachment";
+  const cached = state.fileDecryptCache.get(message.message_id);
+
+  if (!cached) {
+    ensureFileDecryption(message);
+    const loading = document.createElement("p");
+    loading.className = "message-body";
+    loading.textContent = "[E2EE file] Dang giai ma...";
+    wrapper.appendChild(loading);
+    return wrapper;
+  }
+
+  if (cached.status === "loading") {
+    const loading = document.createElement("p");
+    loading.className = "message-body";
+    loading.textContent = "[E2EE file] Dang giai ma...";
+    wrapper.appendChild(loading);
+    return wrapper;
+  }
+
+  if (cached.status === "error") {
+    const error = document.createElement("p");
+    error.className = "message-body";
+    error.textContent = `[E2EE file] Khong giai ma duoc (${cached.error})`;
+    wrapper.appendChild(error);
+    return wrapper;
+  }
+
+  const data = cached.data;
+  if (data.kind === "image") {
+    const img = document.createElement("img");
+    img.src = data.url;
+    img.alt = data.name;
+    img.loading = "lazy";
+    wrapper.appendChild(img);
+  } else if (data.kind === "video") {
+    const video = document.createElement("video");
+    video.controls = true;
+    video.src = data.url;
+    wrapper.appendChild(video);
+  } else if (data.kind === "audio") {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.src = data.url;
+    wrapper.appendChild(audio);
+  }
+
+  if (data.caption) {
+    const cap = document.createElement("p");
+    cap.className = "message-body";
+    cap.textContent = data.caption;
+    wrapper.appendChild(cap);
+  }
+
+  const link = document.createElement("a");
+  link.href = data.url;
+  link.download = data.name;
+  link.textContent = `${data.name} (${formatBytes(data.size)})`;
+  wrapper.appendChild(link);
+
+  return wrapper;
+}
+
+function renderMessages() {
+  const frag = document.createDocumentFragment();
+  const visibleMessages = state.messages.filter(isVisibleInCurrentRoom);
+
+  visibleMessages.forEach((message) => {
+    const item = document.createElement("article");
+    item.className = "message";
+    if (message.sender_ip === state.myIp) {
+      item.classList.add("mine");
+    } else {
+      item.classList.add("other");
+    }
+
+    const meta = document.createElement("p");
+    meta.className = "message-meta";
+    meta.textContent = makeMetaLine(message);
+    item.appendChild(meta);
+
+    if (message.message_type === "text") {
+      if (message.text) {
+        const body = document.createElement("p");
+        body.className = "message-body";
+        body.textContent = message.text;
+        item.appendChild(body);
+      }
+    } else if (message.message_type === "e2ee_text") {
+      const cache = state.textDecryptCache.get(message.message_id);
+      const body = document.createElement("p");
+      body.className = "message-body";
+      if (!cache) {
+        ensureTextDecryption(message);
+        body.textContent = "[E2EE] Dang giai ma...";
+      } else if (cache.status === "loading") {
+        body.textContent = "[E2EE] Dang giai ma...";
+      } else if (cache.status === "error") {
+        body.textContent = `[E2EE] Khong giai ma duoc (${cache.error})`;
+      } else {
+        body.textContent = cache.text;
+      }
+      item.appendChild(body);
+    } else if (message.text) {
+      const body = document.createElement("p");
+      body.className = "message-body";
+      body.textContent = message.text;
+      item.appendChild(body);
+    }
+
+    if (message.message_type === "file") {
+      const attachmentNode = renderPlainAttachment(message);
+      if (attachmentNode) {
+        item.appendChild(attachmentNode);
+      }
+    } else if (message.message_type === "e2ee_file") {
+      const encryptedNode = renderEncryptedFileNode(message);
+      item.appendChild(encryptedNode);
+    }
+
+    frag.appendChild(item);
+  });
+
+  elements.messages.innerHTML = "";
+  elements.messages.appendChild(frag);
+  elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
+function isTypingEventRelevant(payload) {
+  if (!payload || payload.sender_ip === state.myIp) {
+    return false;
+  }
+  if (state.activeRecipient === null) {
+    return payload.recipient_ip === null;
+  }
+  return payload.sender_ip === state.activeRecipient && payload.recipient_ip === state.myIp;
+}
+
+function sendSocketJson(payload) {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    setStatus("Chua ket noi server");
+    return false;
+  }
+  state.socket.send(JSON.stringify(payload));
+  return true;
+}
+
+function announceIdentityIfPossible() {
+  if (!state.e2eeReady || !state.identity) {
+    return;
+  }
+  sendSocketJson({
+    type: "announce_key",
+    public_key: state.identity.publicJwk,
+    key_fingerprint: state.identity.fingerprint,
+  });
+}
+
+function handleSocketEvent(payload) {
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+
+  if (payload.type === "hello") {
+    state.myIp = payload.me?.ip || "";
+    elements.myIp.textContent = state.myIp || "unknown";
+    state.users = Array.isArray(payload.users) ? payload.users : [];
+    state.messages = [];
+    state.knownMessageIds = new Set();
+    state.textDecryptCache = new Map();
+    state.fileDecryptCache.forEach((entry) => {
+      if (entry && entry.status === "ok" && entry.data && entry.data.url) {
+        URL.revokeObjectURL(entry.data.url);
+      }
+    });
+    state.fileDecryptCache = new Map();
+    (payload.messages || []).forEach(addMessage);
+    updateRoomUi();
+    renderUsers();
+    renderMessages();
+    announceIdentityIfPossible();
+    return;
+  }
+
+  if (payload.type === "presence") {
+    state.users = Array.isArray(payload.users) ? payload.users : [];
+    renderUsers();
+    return;
+  }
+
+  if (payload.type === "message") {
+    addMessage(payload.message);
+    renderMessages();
+    return;
+  }
+
+  if (payload.type === "typing") {
+    if (!isTypingEventRelevant(payload)) {
+      return;
+    }
+    if (payload.is_typing) {
+      state.typingPeer = payload.sender_ip;
+      updateTypingHint(`${payload.sender_ip} dang nhap...`);
+    } else if (state.typingPeer === payload.sender_ip) {
+      state.typingPeer = null;
+      updateTypingHint("");
+    }
+    return;
+  }
+}
+
+function connectSocket() {
+  if (
+    state.socket &&
+    (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
+
+  setStatus("Dang ket noi...");
+  const socket = new WebSocket(socketUrl());
+  state.socket = socket;
+
+  socket.addEventListener("open", () => {
+    setStatus("Da ket noi");
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+    announceIdentityIfPossible();
+  });
+
+  socket.addEventListener("message", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      handleSocketEvent(payload);
+    } catch (_) {
+      // Ignore invalid payloads.
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    setStatus("Mat ket noi, dang thu lai...");
+    if (!state.reconnectTimer) {
+      state.reconnectTimer = setTimeout(() => {
+        state.reconnectTimer = null;
+        connectSocket();
+      }, 2000);
+    }
+  });
+
+  socket.addEventListener("error", () => {
+    setStatus("Loi ket noi");
+  });
+}
+
+function sendTypingState(isTyping) {
+  if (state.typingSent === isTyping) {
+    return;
+  }
+  state.typingSent = isTyping;
+  sendSocketJson({
+    type: "typing",
+    recipient_ip: state.activeRecipient,
+    is_typing: isTyping,
+  });
+}
+
+elements.publicBtn.addEventListener("click", () => {
+  state.activeRecipient = null;
+  updateRoomUi();
+  renderMessages();
+});
+
+elements.sendForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = elements.messageInput.value.trim();
+  if (!text) {
+    return;
+  }
+
+  let sent = false;
+  if (state.activeRecipient) {
+    if (!state.e2eeReady || !state.identity) {
+      setStatus("Trinh duyet khong ho tro E2EE.");
+      return;
+    }
+    try {
+      const encrypted = await encryptPrivateText(text, state.activeRecipient);
+      sent = sendSocketJson({
+        type: "send_encrypted_message",
+        recipient_ip: state.activeRecipient,
+        encrypted,
+      });
+    } catch (error) {
+      setStatus(String(error?.message || error || "E2EE send failed"));
+      return;
+    }
+  } else {
+    sent = sendSocketJson({
+      type: "send_message",
+      text,
+      recipient_ip: null,
+    });
+  }
+
+  if (sent) {
+    elements.messageInput.value = "";
+    sendTypingState(false);
+  }
+});
+
+elements.messageInput.addEventListener("input", () => {
+  const hasText = elements.messageInput.value.trim().length > 0;
+  sendTypingState(hasText);
+
+  if (state.typingTimer) {
+    clearTimeout(state.typingTimer);
+    state.typingTimer = null;
+  }
+
+  if (hasText) {
+    state.typingTimer = setTimeout(() => {
+      sendTypingState(false);
+      state.typingTimer = null;
+    }, 900);
+  }
+});
+
+elements.uploadForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = elements.fileInput.files?.[0];
+  if (!file) {
+    return;
+  }
+
+  const formData = new FormData();
+
+  if (state.activeRecipient) {
+    if (!state.e2eeReady || !state.identity) {
+      setStatus("Trinh duyet khong ho tro E2EE.");
+      return;
+    }
+    try {
+      const caption = elements.fileCaption.value.trim();
+      const encrypted = await encryptPrivateFile(file, state.activeRecipient, caption);
+      formData.append("file", encrypted.encryptedBlob, "encrypted.bin");
+      formData.append("recipient_ip", state.activeRecipient);
+      formData.append("encrypted_payload", JSON.stringify(encrypted.encryptedPayload));
+    } catch (error) {
+      setStatus(String(error?.message || error || "E2EE file encrypt failed"));
+      return;
+    }
+  } else {
+    formData.append("file", file);
+    const caption = elements.fileCaption.value.trim();
+    if (caption) {
+      formData.append("caption", caption);
+    }
+  }
+
+  try {
+    const response = await fetch("/api/upload", {
+      method: "POST",
+      body: formData,
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      const detail = payload?.detail || "Khong the upload file.";
+      setStatus(String(detail));
+      return;
+    }
+    addMessage(payload.message);
+    renderMessages();
+    elements.fileInput.value = "";
+    elements.fileCaption.value = "";
+  } catch (_) {
+    setStatus("Upload loi, kiem tra lai ket noi.");
+  }
+});
+
+window.setInterval(() => {
+  sendSocketJson({ type: "ping" });
+}, 30000);
+
+window.addEventListener("beforeunload", () => {
+  state.fileDecryptCache.forEach((entry) => {
+    if (entry && entry.status === "ok" && entry.data && entry.data.url) {
+      URL.revokeObjectURL(entry.data.url);
+    }
+  });
+});
+
+async function bootstrap() {
+  try {
+    await initializeE2EEIdentity();
+  } catch (_) {
+    state.e2eeReady = false;
+    elements.myFingerprint.textContent = "loi key";
+  }
+  connectSocket();
+}
+
+bootstrap();
+

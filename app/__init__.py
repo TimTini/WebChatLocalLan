@@ -1,0 +1,2 @@
+"""WebChatLocalLan package."""
+

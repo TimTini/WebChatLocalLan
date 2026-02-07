@@ -1,0 +1,16 @@
+[project]
+name = "webchat-local-lan"
+version = "0.1.0"
+description = "Local LAN chat webapp with optional E2EE private chat/file support."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "jinja2>=3.1,<4.0",
+    "python-multipart>=0.0.9,<1.0",
+]
+
+[tool.uv]
+package = false
+

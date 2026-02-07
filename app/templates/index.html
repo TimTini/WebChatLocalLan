@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WebChat Local LAN</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <h1>LAN Chat</h1>
+      <p class="me-line">Thiết bị của bạn: <strong id="my-ip">...</strong></p>
+      <p class="me-line">Fingerprint: <strong id="my-fingerprint">khởi tạo...</strong></p>
+      <p class="status-line">Kết nối: <span id="ws-status">Đang kết nối...</span></p>
+      <p class="status-line">E2EE: chat riêng + file riêng</p>
+
+      <div class="room-list">
+        <button class="room-btn active" data-room="public"># Public</button>
+        <div id="users"></div>
+      </div>
+    </aside>
+
+    <main class="chat-panel">
+      <header class="chat-header">
+        <h2 id="room-title">Phòng công khai</h2>
+        <p id="typing-hint"></p>
+      </header>
+
+      <section id="messages" class="messages"></section>
+
+      <form id="send-form" class="send-form">
+        <input id="message-input" type="text" autocomplete="off" placeholder="Nhập tin nhắn..." />
+        <button type="submit">Gửi</button>
+      </form>
+
+      <form id="upload-form" class="upload-form">
+        <input id="file-input" type="file" />
+        <input id="file-caption" type="text" placeholder="Ghi chú file (tuỳ chọn)" />
+        <button type="submit">Gửi file</button>
+      </form>
+    </main>
+  </div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

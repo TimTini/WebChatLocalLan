@@ -1,0 +1,18 @@
+[Unit]
+Description=WebChat Local LAN
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/webchat-local-lan
+Environment=WEBCHAT_HOST=0.0.0.0
+Environment=WEBCHAT_PORT=8000
+Environment=WEBCHAT_UPLOAD_DIR=/opt/webchat-local-lan/uploads
+ExecStart=/usr/bin/env uv run --project /opt/webchat-local-lan --no-sync python -u /opt/webchat-local-lan/main.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
